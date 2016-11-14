@@ -1,6 +1,7 @@
 # projAnalyseHealthCareClaims
 
 Steeve laquitaine
+
 Analyze Healthcare "injection drugs and chemotherapy" claims (j-codes) and build a decision tree model to predict whether a claim must be denied or paid.
 
 The report on the analysis of the dataset (knitReport.html) is generated with knitr (to run each analysis in R the dataset "claim.sample.csv" must be in the path ~/Desktop/data/).
