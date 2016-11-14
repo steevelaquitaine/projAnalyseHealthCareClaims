@@ -1,0 +1,346 @@
+
+
+
+# Analysis of J-code claims data
+#### Steeve Laquitaine
+
+### Take home messages
+* There are 51029 J-code claim lines in the dataset
+* $2417220.959115 were paid for in network J-code claims
+* The top five J-code claims based on the payment to providers were "J1745" "J0180" "J9310" "J3490" "J1644"
+respectively paid total amounts of $434232.08, $299776.56, $168630.87, $90249.91, $81909.40
+* Thirteen providers were paid for at least one J-code
+* Five providers had a lot more denied claim lines than paid claim lines which suggest that 
+the "provider.ID" attribute might be predictive of the denial status of claims. In particular, 
+one provider ("FA0001387001") was concerning : most of its claims were denied and very few were paid.
+* 88 % of all the J-code claim lines were denied. Thus one who want to build a model to predict denial status 
+and evaluate the model accuracy cannot use chance (50%) as a baseline. To be judged good, a model must have an accuracy
+above 88% to outperform the simplest guessing model consisting in always denying claims. Indeed that model 
+would have 88% accuracy.
+* I built a decision tree model that use some of the dataset attributes to predict whether a J-code claim line
+must be denied or not. The best model that i could obtain only relied on 10 attributes 
+"Agreement.ID", "Claim.Charge.Amount", "Claim.Current.Status","Diagnosis.Code","Member.ID","Price.Index","Procedure.Code","Provider.ID","Revenue.Code","Service.Code"
+and predicted the denial status with 96% accuracy, had 98% precision (i.e., 98% of denied claim predictions were correct),
+and 98.6% recall (i.e., the model found 98.6% of the actually denied claims).
+
+
+
+
+
+### Getting started with a bit of setup 
+I first setup large figures for maximum visibility and I install packages
+required for the analysis.
+``````{r setup}
+#Make large figures with good resolution and Install the required packages
+opts_chunk$set(out.width='1000px', dpi=200,comment=NA); list.of.packages = c("caret","rpart","rpart.plot","e1071")
+new.packages = list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]; 
+if(length(new.packages)) install.packages(new.packages)
+```
+
+
+
+
+### 1. Load the dataset and analyse the J-code claim lines
+The dataset "claim.sample.csv" must be in the following path : "~/Desktop/data/claim.sample.csv".
+The dataset is loaded here and the blank entries (missing data) are filled with NA.
+J-code claims are defined as claims that have a "Procedure.Code" attribute that starts 
+with the letter "j" (case-insensitive) and J-code claims are extracted from the original 
+dataset.
+```{r loaddata}
+#set datapath, load dataset and extract J-code claim lines
+dataset = read.table('~/Desktop/data/claim.sample.csv',sep=',',header=T,na.strings=c('NA',''))
+jclaims = droplevels(dataset[grep("^[jJ]", dataset$Procedure.Code),])
+```
+
+#### 1.A - The number of J-code claim lines is :
+```{r findjclaims}
+nrow(jclaims)
+```
+
+#### 1.B - The total amount paid for in-network J-code claims to providers is :
+```{r findjclaimsInNet}
+paste0("$",sum(jclaims[jclaims$In.Out.Of.Network=="I",]$Provider.Payment.Amount))
+```
+
+#### 1.C - The top five J-code claims based on the payments to providers are :
+```{r topcostjcodes}
+#calculate total paid per J-code claim and display top 5
+PaidByJclaim = setNames(aggregate(jclaims$Provider.Payment.Amount,by=list(jclaims$Procedure.Code),FUN=sum,na.rm=TRUE),c('j-code','total.paid'))
+head(PaidByJclaim[order(PaidByJclaim$total.paid,decreasing=T),],n=5)
+```
+
+
+
+
+### 2. The number of providers that were paid for at least one J-code claim line is :
+```{r jclaimsPaid}
+jclaimsPaid = droplevels(jclaims[jclaims$Provider.Payment.Amount>0,])
+nlevels(jclaimsPaid$Provider.ID)
+```
+Those providers are :
+```{r provdMoreThan1}
+levels(jclaimsPaid$Provider.ID)
+```
+
+
+
+#### 2.A -  Scatter plot that displays the number of denied vs. paid claims for each of these providers
+```{r plot1}
+#get the j-code claims of these 13 providers
+jclaimsProvdMoreThan1Jpaid = droplevels(jclaims[jclaims$Provider.ID %in% levels(jclaimsPaid$Provider.ID),])
+#calculate number of j-code claims denied,paid for each of these providers
+denied = aggregate(jclaimsProvdMoreThan1Jpaid$Provider.Payment.Amount==0,by=list(jclaimsProvdMoreThan1Jpaid$Provider.ID),FUN=sum,na.rm=TRUE)
+paid = aggregate(jclaimsProvdMoreThan1Jpaid$Provider.Payment.Amount>0,by=list(jclaimsProvdMoreThan1Jpaid$Provider.ID),FUN=sum,na.rm=TRUE)
+#scatter plot
+plot(paid$x,denied$x,xlab='Number of paid J-code claims for selected providers',ylab='Number of denied J-code claims for selected providers',pch=19)
+#locate concerning provider
+text(paid$x[1],denied$x[1],labels=denied$Group.1[1],cex= 0.7, offset = 10)
+abline(0,1,lty=c(3),col='black')
+legend("topright",c("Providers","Diagonal line"),
+    pch = c(19,NA),lty=c(NA,3),col=c("black","black"))
+```
+
+
+#### 2.B - What insights can you suggest from the graph?
+* Overall the number of denied claims tend to grow much faster than the number of paid claims
+(Most of the black solid data points are above the dashed diagonal line).
+* Five providers have substantially much higher (at least 5 times more) denied claims than paid claims. 
+* We can expect "Provider.ID" to be a good predictor of whether a claim is denied or not.
+
+#### 2.C - Based on the graph, is the behavior of any of the providers concerning? Explain.
+Although five providers have too many denied claims, one provider (identified on the scatter plot by
+its Provider.ID) is particularly concerning as it has lots of denied claims and almost no paid claims :
+```{r oneOutlier}
+levels(denied$Group.1)[1]
+```
+
+
+
+
+
+
+
+### 3. Consider all claim lines with a J-code. 
+
+#### 3.A - What percentage of J-code claim lines were denied?
+```{r percentdenied}
+paste0(sum(jclaims$Provider.Payment.Amount==0)/nrow(jclaims)*100,'%')
+```
+
+#### 3.B - Modeling
+I created a model to predict when a J-code claim is denied. I chose classification decision tree 
+as a modeling approach because :
+* Predicting whether a claim is denied or not is a binary classification task. 
+
+* This is something the simple logistic regression classifier can do but here the 
+data attributes are not all numerical; some are categorical. This is a case that
+a classification tree or a naive Bayes Classifier can deal with as they can work with 
+both data types.
+
+* The Bayes naive classifier is appropriate when factors can be assumed to be independent
+from each other which is not a reasonable assumption here. The data attributes
+have an "and" relationship with each others and most likely interact with the 
+denial status in an "if-then" fashion which is consistent with how decision trees works.
+For example, "if" a patient is diagnosed for a disease that is covered by the insurance "and if" the patient 
+was treated "in-network" then the claim might be paid. 
+
+* The decision tree automatically selects the attributes that influence the outcome predictions. 
+Those are the top few nodes on which the tree is split.
+
+* The decision tree is robust to the presence of missing data which our dataset has :
+```{r missing data}
+sum(is.na(jclaims))
+```
+
+* The decision tree offers a more intuitive understanding of the decision-making process
+that leads to claim denial.
+
+#### Create the dataset used for modeling
+I calculated a denial status for each claim (denied (labelled 1) if Provider.Payment.Amount==0, 
+	paid (labelled 0)if Provider.Payment.Amount>0) and added that outcome variable to the j-codes
+	dataset for modeling 
+```{r denialStatus}
+jToModel = jclaims
+jToModel$denialStatus = NA
+#denied claims are labelled "1", paid "0" and denial status is added to the dataset
+jToModel$denialStatus[jToModel$Provider.Payment.Amount==0]=1
+jToModel$denialStatus[jToModel$Provider.Payment.Amount>0]=0
+jToModel$denialStatus = as.factor(jToModel$denialStatus)
+```
+
+#### Make sense of dataset variables and prepare for modeling
+I removed from that dataset all the factors that :
+* are most likely not predictors : "X","Claim.Number", "Reference.Index", "Claim.Line.Number"  
+* depend on the denial status : "Denial.Reason.Code" is removed because the insurer/payer probably needs a model 
+that will help it assign a denial status to each claim. In that case "Denial.Reason.Code" which is an attribute 
+that is probably available only after the denial decision will not be available in new test data. 
+* that directly contributed to calculate the denial status : "Provider.Payment.Amount". Keeping that variable among the predictors
+automatically produces spurious classification accuracy of 100% as used to calculate the denial status.
+```{r removeFactors}
+jToModel[,c("Provider.Payment.Amount","X","Claim.Number", "Reference.Index", "Claim.Line.Number","Denial.Reason.Code")] = NULL
+```
+
+* Nine of the numerical dataset attributes ("Place.Of.Service.Code", "Member.ID","Subscriber.Index","Claim.Current.Status"
+"Line.Of.Business.ID","Group.Index","Subgroup.Index") actually express categories and not quantities. 
+There were thus converted to factors.
+The remaining two numerical attributes ("Claim.Charge.Amount","Subscriber.Payment.Amount")
+are money amounts and were thus left unchanged.
+```{r convFactors}
+#convert the following attributes to factors and display the dataset data types
+toFactor = c("Place.Of.Service.Code", "Member.ID","Subscriber.Index","Claim.Current.Status","Line.Of.Business.ID","Group.Index","Subgroup.Index")
+jToModel[toFactor] <- lapply(jToModel[toFactor], function(x) as.factor(as.numeric(x)))
+unique(sapply(jToModel,class))
+```
+
+The dataset for modeling thus contains the following predictor attributes :
+```{r leftAttributes}
+predictors = setdiff(colnames(jToModel),c("denialStatus"))
+predictors
+```
+
+##### Build a simple tree model (pruned) that generalizes well (cross-validated)
+One key disadvantage of decision trees is that they tend to overfit the data they are trained on leading
+to poor generalization performance (predicting accuracy) on new test datasets. So 
+I cross-validated the model by first splitting the dataset into 90% train and 10% test subsets ,
+and by then splitting the train dataset into 90% train and 10% validation subsets. The model was trained
+on that train subset and validated by checking how well its predicting accuracy generalized to the validation 
+subset.
+```{r crossval}
+library('caret')
+set.seed(729376)
+#split train-test
+ix = createDataPartition(jToModel$denialStatus,p=0.9,list=FALSE)
+jTrainAll = jToModel[ix,]
+jTest = jToModel[-ix,]
+#split train-validation
+ix = createDataPartition(jTrainAll$denialStatus,p=0.9,list=FALSE)
+jTrain = jTrainAll[ix,]
+jval = jTrainAll[-ix,]
+```
+
+I used the train dataset to build the model.
+```{r buildTree}
+library('rpart'); library(rpart.plot)
+tmodel = rpart(formula=denialStatus~.,data=jTrain,method='class',control=rpart.control(minsplit=10, cp=0))
+```
+
+I selected the decision tree size that minimized the cross-validated error rate 
+produced from training.
+```{r pruning}
+#get tree depth parameter that minimizes cross-validated error rate and use to prune tree
+bestcp <- tmodel$cptable[which.min(tmodel$cptable[,"xerror"]),"CP"]
+tmodel.pruned <- prune(tmodel, cp = bestcp)
+```
+
+The decision tree will be very difficult to visualize because many of the categorical 
+attributes have lots of levels as you can see below :
+```{r predictorLevels}
+categPred = predictors[sapply(jToModel[,predictors],class) %in% c('factor')]
+numPred = predictors[sapply(jToModel[,predictors],class) %in% c('numeric','integer')]
+sapply(jToModel[,categPred],nlevels)
+```
+The decision tree would look something like that :
+```{r plotTree}
+#split the labels at the branches into multiple line for visibility
+split.fun <- function(x, labs, digits, varlen, faclen){    
+    labs <- gsub(",", " ", labs);    
+    for(i in 1:length(labs)){    	            
+        labs[i] <- paste(strwrap(labs[i], width=25), collapse="\n")};       
+	labs; 
+	}
+par(xpd=TRUE)
+#plot the tree
+prp(tmodel.pruned,type=3,cex=0.1,varlen=3,faclen=3,split.fun= split.fun,
+    box.col=c("red", "green"),extra = 0,
+    branch=1,add.labs=TRUE,branch.lty=1,branch.lwd=3)
+legend("bottomleft", legend = c("denied","paid"), fill = c("red", "green"),
+       title = "Group")
+```
+which is impossible to read.
+
+#### 3.C - How accurate is your model at predicting denied claims?
+Model accuracy is the most common performance metric: The model predicted denial
+status correctly 96.9% of the time on a test dataset — better than chance (50%). However in the dataset, 88% of the claims are denied,
+so guessing "denied" all the time would be 88% accurate but not useful for our unbalanced dataset. 
+But we can still see that our model performs better than chance and does better than the simplest
+guessing model consisting in always predicting "denied" (a lower bound on performance).
+
+* The accuracies of a model based on the numerical factors are, for the train, validation and test sets :
+The accuracies are better than for a simple constant prediction model (88%), and remain high (a small drop)
+between the training, validation and test dataset, thus the model generalizes well (overfit only a little):
+```{r accuracies}
+#accuracy on training, validation and test subset
+accTr=sum(predict(tmodel.pruned,newdata=jTrain,type='class')==jTrain[,"denialStatus"])/nrow(jTrain)*100
+accVa=sum(predict(tmodel.pruned,newdata=jval,type='class')==jval[,"denialStatus"])/nrow(jval)*100
+accTe=sum(predict(tmodel.pruned,newdata=jTest,type='class')==jTest[,"denialStatus"])/nrow(jTest)*100
+cat(accTr,"% accuracy on train\n",accVa,"% accuracy on validation\n",accTe,"% accuracy on test\n") 
+```
+
+
+
+What matters to the business is probably the proportion of claims that the model 
+failed to correctly deny because misses lead to overpayments.
+Thus the model recall (denied claims found by the model) must be high and the number
+of misses or false negatives must be low which are conditions that are satisfied by the model
+* 98% of the claims predicted as denied were actually denied (high precision)
+* 98.6% of the denied claims were found by the model (high recall) and 1.4% were missed
+```{r perfmetrics}
+#calculate confusion matrix, model precision and recall
+confmatrix = table(jTest$denialStatus,predict(tmodel.pruned,newdata=jTest,type='class'))
+precision = confmatrix[2,2]/sum(confmatrix[,2])
+recall = confmatrix[2,2]/sum(confmatrix[2,])
+paste0(precision, "% precision")
+paste0(recall, "% recall")
+```
+
+
+We can also check that the confusion matrix has enough sample 
+of all cases and nothing weird that would prevent interpretation of 
+the recall and precision. As you can see below, the sample size
+are ok.
+```{r confmatrix}
+#annotate confusion matrix and display
+rownames(confmatrix)=c("paid","denied")
+colnames(confmatrix)=c("predicted paid","predicted denied")
+confmatrix
+```
+
+
+#### 3.D -  What data attributes are predominately influencing the denial rate?
+The decision tree automatically selects 10 attributes that predominately influence
+the error rate and thus prediction accuracy. Those 10 attributes are stated below 
+under "Variables actually used in tree construction":
+```{r importantAttributes}
+printcp(tmodel.pruned)
+```
+
+### Conclusion
+The dataset analysed probably comes from an health insurer that would like a solution
+to decide when a claim must be paid or denied with high precision. Such solution would
+allow them to reduce overpayments that result from paying claims that should have 
+been denied.
+
+I analysed J-code claim lines which I assume stand for CMS codes for "injected drugs & chemotherapy".
+
+The analysis revealed that ten attributes contribute to the decision to deny or 
+accept a J-code claim : ("Agreement.ID", "Claim.Charge.Amount", "Claim.Current.Status","Diagnosis.Code",
+    "Member.ID","Price.Index","Procedure.Code","Provider.ID","Revenue.Code","Service.Code"
+Using those attribute in a decision tree can predict the denial status of a claim with high accuracy
+(96%), produce a precision in predicting denied claims of 98% and a recall (98.6%) which means 
+1.4% of overpayment. A better model can probably be built to reduce overpayment if 1.4% is still too 
+high for the business.
+
+One concern is that decision tree models can be biased toward data attributes that have many
+levels. This is the case for many of the categorical data attributes, which the model can potentially
+be improved by taking care of this issue. One can for example better balance the dataset by 
+pruning the very rare levels of some attributes. Another way is to do dimensionality reduction to
+find features that are discriminative before hand,
+
+
+
+
+
+
+
+
+
