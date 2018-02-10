@@ -30,7 +30,7 @@ and 98.6% recall (i.e., the model found 98.6% of the actually denied claims).
 ### Getting started with a bit of setup 
 I first setup large figures for maximum visibility and I install packages
 required for the analysis.
-``````{r setup}
+```{r setup}
 #Make large figures with good resolution and Install the required packages
 opts_chunk$set(out.width='1000px', dpi=200,comment=NA); list.of.packages = c("caret","rpart","rpart.plot","e1071")
 new.packages = list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]; 
